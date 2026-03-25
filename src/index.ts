@@ -12,7 +12,15 @@ import { connectRedis, redisClient } from "./config/redis";
 import { pool } from "./config/database";
 import { globalTimeout, haltOnTimedout, timeoutErrorHandler } from "./middleware/timeout";
 import { responseTime } from "./middleware/responseTime";
-import { createQueueDashboard, getQueueHealth, pauseQueueEndpoint, resumeQueueEndpoint } from "./queue";
+import {
+  createQueueDashboard,
+  getQueueHealth,
+  pauseQueueEndpoint,
+  resumeQueueEndpoint,
+} from "./queue";
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+import { startJobs } from "./jobs/scheduler";
+
 import { register } from "./utils/metrics";
 import { metricsMiddleware } from "./middleware/metrics";
 
@@ -21,10 +29,13 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Rate limiter
+// Rate limiter configuration
+const RATE_LIMIT_WINDOW_MS = parseInt(process.env.RATE_LIMIT_WINDOW_MS || '900000'); // 15 minutes
+const RATE_LIMIT_MAX_REQUESTS = parseInt(process.env.RATE_LIMIT_MAX_REQUESTS || '100');
+
 const limiter = rateLimit({
-  windowMs: Number(process.env.RATE_LIMIT_WINDOW_MS) || 15 * 60 * 1000,
-  max: Number(process.env.RATE_LIMIT_MAX_REQUESTS) || 100,
+  windowMs: RATE_LIMIT_WINDOW_MS,
+  max: RATE_LIMIT_MAX_REQUESTS,
   standardHeaders: true,
   legacyHeaders: false,
 });
