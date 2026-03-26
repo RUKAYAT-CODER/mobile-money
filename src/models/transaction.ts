@@ -32,7 +32,18 @@ export interface Transaction {
   tags: string[];
   notes?: string;
   admin_notes?: string;
+  webhook_delivery_status?: "pending" | "delivered" | "failed" | "skipped";
+  webhook_last_attempt_at?: Date | null;
+  webhook_delivered_at?: Date | null;
+  webhook_last_error?: string | null;
   createdAt: Date;
+}
+
+export interface WebhookDeliveryUpdate {
+  status: "pending" | "delivered" | "failed" | "skipped";
+  lastAttemptAt?: Date | null;
+  deliveredAt?: Date | null;
+  lastError?: string | null;
 }
 
 export class TransactionModel {
@@ -71,14 +82,46 @@ export class TransactionModel {
   }
 
   /** Paginated list, newest first. `limit` is capped at 100. */
-  async list(limit = 50, offset = 0): Promise<Transaction[]> {
+  async list(limit = 50, offset = 0, startDate?: string, endDate?: string): Promise<Transaction[]> {
     const capped = Math.min(Math.max(limit, 1), 100);
     const off = Math.max(offset, 0);
-    const result = await pool.query(
-      "SELECT * FROM transactions ORDER BY created_at DESC LIMIT $1 OFFSET $2",
-      [capped, off],
-    );
+    
+    let query = "SELECT * FROM transactions WHERE 1=1";
+    const params: any[] = [];
+    let paramIndex = 1;
+
+    if (startDate) {
+      query += ` AND created_at >= $${paramIndex++}`;
+      params.push(new Date(startDate).toISOString());
+    }
+    if (endDate) {
+      query += ` AND created_at <= $${paramIndex++}`;
+      params.push(new Date(endDate).toISOString());
+    }
+
+    query += ` ORDER BY created_at DESC LIMIT $${paramIndex++} OFFSET $${paramIndex++}`;
+    params.push(capped, off);
+
+    const result = await pool.query(query, params);
     return result.rows;
+  }
+
+  async count(startDate?: string, endDate?: string): Promise<number> {
+    let query = "SELECT COUNT(*) FROM transactions WHERE 1=1";
+    const params: any[] = [];
+    let paramIndex = 1;
+
+    if (startDate) {
+      query += ` AND created_at >= $${paramIndex++}`;
+      params.push(new Date(startDate).toISOString());
+    }
+    if (endDate) {
+      query += ` AND created_at <= $${paramIndex++}`;
+      params.push(new Date(endDate).toISOString());
+    }
+
+    const result = await pool.query(query, params);
+    return parseInt(result.rows[0].count);
   }
 
   async updateStatus(id: string, status: TransactionStatus): Promise<void> {
@@ -86,6 +129,28 @@ export class TransactionModel {
       status,
       id,
     ]);
+  }
+
+  async updateWebhookDelivery(
+    id: string,
+    delivery: WebhookDeliveryUpdate,
+  ): Promise<void> {
+    await pool.query(
+      `UPDATE transactions
+       SET webhook_delivery_status = $1,
+           webhook_last_attempt_at = $2,
+           webhook_delivered_at = $3,
+           webhook_last_error = $4,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE id = $5`,
+      [
+        delivery.status,
+        delivery.lastAttemptAt ?? null,
+        delivery.deliveredAt ?? null,
+        delivery.lastError ?? null,
+        id,
+      ],
+    );
   }
 
   async findByReferenceNumber(
@@ -201,54 +266,38 @@ export class TransactionModel {
   }
 
   /**
-   * Find transactions by status(es) with pagination.
-   * @param statuses - Array of transaction statuses to filter by (empty array = all statuses)
-   * @param limit - Number of results per page (max 100)
-   * @param offset - Number of results to skip
-   * @returns Array of transactions ordered by created_at DESC
+   * Search transactions by phone number with partial matching support.
+   * Uses LIKE with parameterised queries — safe against SQL injection.
+   * Partial input (e.g. last 4 digits) is matched against the end of the number.
    */
-  async findByStatuses(
-    statuses: TransactionStatus[] = [],
+  async searchByPhoneNumber(
+    phoneNumber: string,
     limit = 50,
     offset = 0,
-  ): Promise<Transaction[]> {
+  ): Promise<{ transactions: Transaction[]; total: number }> {
     const capped = Math.min(Math.max(limit, 1), 100);
     const off = Math.max(offset, 0);
 
-    if (statuses.length === 0) {
-      // No filter, return all
-      const result = await pool.query(
-        "SELECT * FROM transactions ORDER BY created_at DESC LIMIT $1 OFFSET $2",
-        [capped, off],
-      );
-      return result.rows;
-    }
+    // Partial match: if fewer than 7 digits, match the suffix; otherwise full LIKE
+    const pattern =
+      phoneNumber.replace(/^\+/, "").length < 7
+        ? `%${phoneNumber}`
+        : `%${phoneNumber}%`;
 
-    // Filter by statuses
-    const result = await pool.query(
-      "SELECT * FROM transactions WHERE status = ANY($1) ORDER BY created_at DESC LIMIT $2 OFFSET $3",
-      [statuses, capped, off],
+    const countResult = await pool.query(
+      "SELECT COUNT(*)::int AS total FROM transactions WHERE phone_number LIKE $1",
+      [pattern],
     );
-    return result.rows;
-  }
-
-  /**
-   * Count transactions by status(es).
-   * @param statuses - Array of transaction statuses to filter by (empty array = all statuses)
-   * @returns Total count of matching transactions
-   */
-  async countByStatuses(statuses: TransactionStatus[] = []): Promise<number> {
-    if (statuses.length === 0) {
-      const result = await pool.query(
-        "SELECT COUNT(*) FROM transactions",
-      );
-      return parseInt(result.rows[0].count, 10);
-    }
+    const total: number = countResult.rows[0].total;
 
     const result = await pool.query(
-      "SELECT COUNT(*) FROM transactions WHERE status = ANY($1)",
-      [statuses],
+      `SELECT * FROM transactions
+       WHERE phone_number LIKE $1
+       ORDER BY created_at DESC
+       LIMIT $2 OFFSET $3`,
+      [pattern, capped, off],
     );
-    return parseInt(result.rows[0].count, 10);
+
+    return { transactions: result.rows, total };
   }
 }
